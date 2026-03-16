@@ -63,29 +63,35 @@ func NewEngine(ctx context.Context, cfg *config.Config) (*Engine, error) {
 		return engine, err
 	}
 	engine.client = engine.manager.GetClient()
-	engine.tunnel = &TunnelEngine{
-		nodeName:      engine.nodeName,
-		forwardNodeIP: cfg.Tunnel.ForwardNodeIP,
-		natTraversal:  cfg.Tunnel.NATTraversal,
-		config:        cfg,
-		ravenClient:   engine.client,
-	}
-	err = engine.tunnel.InitDriver()
-	if err != nil {
-		klog.Errorf("fail to init tunnel driver, error %s", err.Error())
-		return engine, err
+
+	if cfg.EnableTunnel {
+		engine.tunnel = &TunnelEngine{
+			nodeName:      engine.nodeName,
+			forwardNodeIP: cfg.Tunnel.ForwardNodeIP,
+			natTraversal:  cfg.Tunnel.NATTraversal,
+			config:        cfg,
+			ravenClient:   engine.client,
+		}
+		err = engine.tunnel.InitDriver()
+		if err != nil {
+			klog.Errorf("fail to init tunnel driver, error %s", err.Error())
+			return engine, err
+		}
 	}
 
-	engine.proxy = &ProxyEngine{
-		nodeName:    engine.nodeName,
-		nodeIP:      engine.nodeIP,
-		config:      cfg,
-		client:      engine.client,
-		option:      engine.option,
-		ctx:         engine.context,
-		proxyOption: newProxyOption(),
-		proxyCtx:    newProxyContext(ctx),
+	if cfg.EnableProxy {
+		engine.proxy = &ProxyEngine{
+			nodeName:    engine.nodeName,
+			nodeIP:      engine.nodeIP,
+			config:      cfg,
+			client:      engine.client,
+			option:      engine.option,
+			ctx:         engine.context,
+			proxyOption: newProxyOption(),
+			proxyCtx:    newProxyContext(ctx),
+		}
 	}
+
 	return engine, nil
 }
 
@@ -127,15 +133,17 @@ func (e *Engine) processNextWorkItem() bool {
 
 func (e *Engine) sync() error {
 	e.findLocalGateway()
-	err := e.proxy.Handler()
-	if err != nil {
-		return err
+	if e.proxy != nil {
+		if err := e.proxy.Handler(); err != nil {
+			return err
+		}
 	}
-	err = e.tunnel.Handler()
-	if err != nil {
-		return err
+	if e.tunnel != nil {
+		if err := e.tunnel.Handler(); err != nil {
+			return err
+		}
+		e.option.SetTunnelStatus(e.tunnel.Status())
 	}
-	e.option.SetTunnelStatus(e.tunnel.Status())
 	return nil
 }
 
@@ -144,8 +152,12 @@ func (e *Engine) regularSync() {
 }
 
 func (e *Engine) findLocalGateway() {
-	e.tunnel.localGateway = nil
-	e.proxy.localGateway = nil
+	if e.tunnel != nil {
+		e.tunnel.localGateway = nil
+	}
+	if e.proxy != nil {
+		e.proxy.localGateway = nil
+	}
 	var gwList v1beta1.GatewayList
 	err := e.client.List(context.TODO(), &gwList)
 	if err != nil {
@@ -154,8 +166,12 @@ func (e *Engine) findLocalGateway() {
 	for _, gw := range gwList.Items {
 		for _, node := range gw.Status.Nodes {
 			if node.NodeName == e.nodeName {
-				e.tunnel.localGateway = gw.DeepCopy()
-				e.proxy.localGateway = gw.DeepCopy()
+				if e.tunnel != nil {
+					e.tunnel.localGateway = gw.DeepCopy()
+				}
+				if e.proxy != nil {
+					e.proxy.localGateway = gw.DeepCopy()
+				}
 				return
 			}
 		}
@@ -163,10 +179,10 @@ func (e *Engine) findLocalGateway() {
 }
 
 func (e *Engine) Cleanup() {
-	if e.option.GetTunnelStatus() {
+	if e.tunnel != nil && e.option.GetTunnelStatus() {
 		e.tunnel.CleanupDriver()
 	}
-	if e.option.GetProxyStatus() {
+	if e.proxy != nil && e.option.GetProxyStatus() {
 		e.proxy.stop()
 	}
 }

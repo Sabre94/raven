@@ -72,11 +72,13 @@ func NewRavenAgentCommand(ctx context.Context) *cobra.Command {
 
 // Run starts the raven-agent
 func Run(ctx context.Context, cfg *config.CompletedConfig) error {
-	if err := disableICMPRedirect(); err != nil {
-		return err
-	}
-	if err := disableICMPRpFilter(); err != nil {
-		return err
+	if cfg.EnableTunnel {
+		if err := disableICMPRedirect(); err != nil {
+			return err
+		}
+		if err := disableICMPRpFilter(); err != nil {
+			return err
+		}
 	}
 	engine, err := ravenengine.NewEngine(ctx, cfg.Config)
 	if err != nil {

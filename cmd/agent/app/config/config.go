@@ -29,6 +29,9 @@ type Config struct {
 	SyncRules  bool
 	SyncPeriod metav1.Duration
 
+	EnableTunnel bool
+	EnableProxy  bool
+
 	MetricsBindAddress string
 	HealthProbeAddr    string
 

@@ -49,6 +49,8 @@ type AgentOptions struct {
 	HealthProbeAddr    string
 	SyncRules          bool
 	SyncPeriod         metav1.Duration
+	EnableTunnel       bool
+	EnableProxy        bool
 }
 
 type TunnelOptions struct {
@@ -87,13 +89,19 @@ func NewDefaultOptions() *AgentOptions {
 			ProxyServerCertDir:       utils.RavenProxyServerCertDir,
 			InterceptorServerUDSFile: utils.RavenProxyServerUDSFile,
 		},
-		NodeName: os.Getenv("NODE_NAME"),
-		NodeIP:   os.Getenv("NODE_IP"),
+		NodeName:     os.Getenv("NODE_NAME"),
+		NodeIP:       os.Getenv("NODE_IP"),
+		EnableTunnel: true,
+		EnableProxy:  true,
 	}
 }
 
 // Validate validates the AgentOptions
 func (o *AgentOptions) Validate() error {
+	if !o.EnableTunnel && !o.EnableProxy {
+		return errors.New("at least one of --enable-tunnel or --enable-proxy must be true")
+	}
+
 	if o.NodeName == "" {
 		return errors.New("either --node-name or $NODE_NAME has to be set")
 	}
@@ -101,15 +109,17 @@ func (o *AgentOptions) Validate() error {
 		return errors.New("either --node-ip or $NODE_IP has to be set")
 	}
 
-	if o.VPNDriver != libreswan.DriverName && o.VPNDriver != wireguard.DriverName {
-		return errors.New("currently only supports libreswan and wireguard VPN drivers")
-	}
+	if o.EnableTunnel {
+		if o.VPNDriver != libreswan.DriverName && o.VPNDriver != wireguard.DriverName {
+			return errors.New("currently only supports libreswan and wireguard VPN drivers")
+		}
 
-	reg := regexp.MustCompile(`^[0-9a-fA-F]+$`)
-	strs := strings.Split(o.MACPrefix, ":")
-	for i := range strs {
-		if !reg.MatchString(strings.ToLower(strs[i])) {
-			return fmt.Errorf("mac prefix %s is nonstandard", o.MACPrefix)
+		reg := regexp.MustCompile(`^[0-9a-fA-F]+$`)
+		strs := strings.Split(o.MACPrefix, ":")
+		for i := range strs {
+			if !reg.MatchString(strings.ToLower(strs[i])) {
+				return fmt.Errorf("mac prefix %s is nonstandard", o.MACPrefix)
+			}
 		}
 	}
 
@@ -150,6 +160,9 @@ func (o *AgentOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.ProxyServerCertDir, "server-cert-dir", o.ProxyServerCertDir, "The directory of certificate stored at.")
 	fs.StringVar(&o.ProxyServerCertDNSNames, "server-cert-dns-names", o.ProxyServerCertDNSNames, "DNS names that will be added into server's certificate. (e.g., dns1,dns2)")
 	fs.StringVar(&o.ProxyServerCertIPs, "server-cert-ips", o.ProxyServerCertIPs, "IPs that will be added into server's certificate. (e.g., ip1,ip2)")
+
+	fs.BoolVar(&o.EnableTunnel, "enable-tunnel", o.EnableTunnel, `Enable L3 tunnel engine. (default "true")`)
+	fs.BoolVar(&o.EnableProxy, "enable-proxy", o.EnableProxy, `Enable L7 proxy engine. (default "true")`)
 }
 
 // Config return a raven agent config objective
@@ -160,10 +173,12 @@ func (o *AgentOptions) Config() (*config.Config, error) {
 	}
 	cfg = restclient.AddUserAgent(cfg, "raven-agent-ds")
 	c := &config.Config{
-		NodeName:   o.NodeName,
-		NodeIP:     o.NodeIP,
-		SyncRules:  o.SyncRules,
-		SyncPeriod: o.SyncPeriod,
+		NodeName:     o.NodeName,
+		NodeIP:       o.NodeIP,
+		SyncRules:    o.SyncRules,
+		SyncPeriod:   o.SyncPeriod,
+		EnableTunnel: o.EnableTunnel,
+		EnableProxy:  o.EnableProxy,
 	}
 	c.KubeConfig = cfg
 	c.MetricsBindAddress = resolveAddress(c.MetricsBindAddress, resolveLocalHost(), strconv.Itoa(DefaultTunnelMetricsPort))
@@ -172,38 +187,43 @@ func (o *AgentOptions) Config() (*config.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create manager: %s", err)
 	}
-	_, port, err := net.SplitHostPort(o.VPNPort)
-	if err != nil {
-		klog.Warningf("failed to parse VPN port %s, fallback to default %d: %s", o.VPNPort, v1beta1.DefaultTunnelServerExposedPort, err)
-		port = strconv.Itoa(v1beta1.DefaultTunnelServerExposedPort)
-	}
-	c.Tunnel = &config.TunnelConfig{
-		VPNPort:           port,
-		VPNDriver:         o.VPNDriver,
-		RouteDriver:       o.RouteDriver,
-		MACPrefix:         o.MACPrefix,
-		ForwardNodeIP:     o.ForwardNodeIP,
-		NATTraversal:      o.NATTraversal,
-		KeepAliveInterval: o.KeepAliveInterval,
-		KeepAliveTimeout:  o.KeepAliveTimeout,
-	}
-	c.Proxy = &config.ProxyConfig{
-		ProxyMetricsAddress:     o.ProxyMetricsAddress,
-		InternalInsecureAddress: o.InternalInsecureAddress,
-		InternalSecureAddress:   o.InternalSecureAddress,
-		ExternalAddress:         o.ExternalAddress,
 
-		ProxyServerCertDNSNames:  o.ProxyServerCertDNSNames,
-		ProxyServerCertIPs:       o.ProxyServerCertIPs,
-		ProxyClientCertDir:       o.ProxyClientCertDir,
-		ProxyServerCertDir:       o.ProxyServerCertDir,
-		InterceptorServerUDSFile: o.InterceptorServerUDSFile,
+	if o.EnableTunnel {
+		_, port, err := net.SplitHostPort(o.VPNPort)
+		if err != nil {
+			klog.Warningf("failed to parse VPN port %s, fallback to default %d: %s", o.VPNPort, v1beta1.DefaultTunnelServerExposedPort, err)
+			port = strconv.Itoa(v1beta1.DefaultTunnelServerExposedPort)
+		}
+		c.Tunnel = &config.TunnelConfig{
+			VPNPort:           port,
+			VPNDriver:         o.VPNDriver,
+			RouteDriver:       o.RouteDriver,
+			MACPrefix:         o.MACPrefix,
+			ForwardNodeIP:     o.ForwardNodeIP,
+			NATTraversal:      o.NATTraversal,
+			KeepAliveInterval: o.KeepAliveInterval,
+			KeepAliveTimeout:  o.KeepAliveTimeout,
+		}
 	}
 
-	c.Proxy.InternalInsecureAddress = resolveAddress(c.Proxy.InternalInsecureAddress, c.NodeIP, strconv.Itoa(v1beta1.DefaultProxyServerInsecurePort))
-	c.Proxy.InternalSecureAddress = resolveAddress(c.Proxy.InternalSecureAddress, c.NodeIP, strconv.Itoa(v1beta1.DefaultProxyServerSecurePort))
-	c.Proxy.ExternalAddress = resolveAddress(c.Proxy.ExternalAddress, c.NodeIP, strconv.Itoa(v1beta1.DefaultProxyServerExposedPort))
-	c.Proxy.ProxyMetricsAddress = resolveAddress(c.Proxy.ProxyMetricsAddress, resolveLocalHost(), strconv.Itoa(DefaultProxyMetricsPort))
+	if o.EnableProxy {
+		c.Proxy = &config.ProxyConfig{
+			ProxyMetricsAddress:     o.ProxyMetricsAddress,
+			InternalInsecureAddress: o.InternalInsecureAddress,
+			InternalSecureAddress:   o.InternalSecureAddress,
+			ExternalAddress:         o.ExternalAddress,
+
+			ProxyServerCertDNSNames:  o.ProxyServerCertDNSNames,
+			ProxyServerCertIPs:       o.ProxyServerCertIPs,
+			ProxyClientCertDir:       o.ProxyClientCertDir,
+			ProxyServerCertDir:       o.ProxyServerCertDir,
+			InterceptorServerUDSFile: o.InterceptorServerUDSFile,
+		}
+		c.Proxy.InternalInsecureAddress = resolveAddress(c.Proxy.InternalInsecureAddress, c.NodeIP, strconv.Itoa(v1beta1.DefaultProxyServerInsecurePort))
+		c.Proxy.InternalSecureAddress = resolveAddress(c.Proxy.InternalSecureAddress, c.NodeIP, strconv.Itoa(v1beta1.DefaultProxyServerSecurePort))
+		c.Proxy.ExternalAddress = resolveAddress(c.Proxy.ExternalAddress, c.NodeIP, strconv.Itoa(v1beta1.DefaultProxyServerExposedPort))
+		c.Proxy.ProxyMetricsAddress = resolveAddress(c.Proxy.ProxyMetricsAddress, resolveLocalHost(), strconv.Itoa(DefaultProxyMetricsPort))
+	}
 
 	return c, nil
 }
